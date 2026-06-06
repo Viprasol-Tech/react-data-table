@@ -1,6 +1,6 @@
 {
   "name": "react-data-table",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sortable, paginated, filterable data table component for React.",
   "type": "module",
   "license": "MIT",
@@ -17,10 +17,18 @@
     "react",
     "data-table",
     "table",
+    "datagrid",
     "sorting",
+    "multi-sort",
+    "filtering",
     "pagination",
+    "row-selection",
+    "csv-export",
+    "column-visibility",
+    "server-side",
     "typescript",
-    "ui-components"
+    "ui-components",
+    "accessible"
   ],
   "main": "dist/index.js",
   "module": "dist/index.js",

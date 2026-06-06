@@ -1,12 +1,22 @@
 import { describe, it, expect } from "vitest";
 import {
   sortRows,
+  sortRowsMulti,
+  toggleSortSpec,
   paginate,
   filterRows,
+  filterRowsByColumn,
   compareValues,
   nextSortDirection,
   pageCount,
   clampPage,
+  toCsv,
+  escapeCsvValue,
+  resolveRowId,
+  toggleSelection,
+  selectionState,
+  setAllSelected,
+  type SortSpec,
 } from "../logic.js";
 
 interface Person {
@@ -44,6 +54,20 @@ describe("compareValues", () => {
   it("orders booleans false < true", () => {
     expect(compareValues(false, true)).toBeLessThan(0);
     expect(compareValues(true, false)).toBeGreaterThan(0);
+  });
+
+  it("orders Date values chronologically", () => {
+    const early = new Date("2020-01-01");
+    const late = new Date("2024-06-15");
+    expect(compareValues(early, late)).toBeLessThan(0);
+    expect(compareValues(late, early)).toBeGreaterThan(0);
+    expect(compareValues(early, new Date("2020-01-01"))).toBe(0);
+  });
+
+  it("orders NaN after real numbers", () => {
+    expect(compareValues(NaN, 1)).toBeGreaterThan(0);
+    expect(compareValues(1, NaN)).toBeLessThan(0);
+    expect(compareValues(NaN, NaN)).toBe(0);
   });
 });
 
@@ -173,5 +197,215 @@ describe("filterRows", () => {
       { name: "y", active: undefined },
     ];
     expect(filterRows(rows, "x")).toHaveLength(1);
+  });
+});
+
+describe("sortRowsMulti", () => {
+  it("sorts by the primary key then breaks ties with the secondary", () => {
+    const specs: SortSpec<Person>[] = [
+      { key: "age", dir: "asc" },
+      { key: "name", dir: "asc" },
+    ];
+    const result = sortRowsMulti(people, specs);
+    // age asc: 22(dave), 25(alice), 30(Bob), 30(Charlie) — name asc breaks the 30 tie
+    expect(result.map((p) => `${p.age}-${p.name}`)).toEqual([
+      "22-dave",
+      "25-alice",
+      "30-Bob",
+      "30-Charlie",
+    ]);
+  });
+
+  it("respects per-spec direction independently", () => {
+    const specs: SortSpec<Person>[] = [
+      { key: "age", dir: "asc" },
+      { key: "name", dir: "desc" },
+    ];
+    const result = sortRowsMulti(people, specs);
+    expect(result.map((p) => `${p.age}-${p.name}`)).toEqual([
+      "22-dave",
+      "25-alice",
+      "30-Charlie",
+      "30-Bob",
+    ]);
+  });
+
+  it("returns a shallow copy in original order for empty specs", () => {
+    const result = sortRowsMulti(people, []);
+    expect(result.map((p) => p.name)).toEqual([
+      "Charlie",
+      "alice",
+      "Bob",
+      "dave",
+    ]);
+    expect(result).not.toBe(people);
+  });
+
+  it("does not mutate the input array", () => {
+    const copy = people.slice();
+    sortRowsMulti(people, [{ key: "age", dir: "desc" }]);
+    expect(people).toEqual(copy);
+  });
+});
+
+describe("toggleSortSpec", () => {
+  it("appends a new column as ascending", () => {
+    const next = toggleSortSpec<Person>([], "age");
+    expect(next).toEqual([{ key: "age", dir: "asc" }]);
+  });
+
+  it("flips an existing ascending column to descending", () => {
+    const next = toggleSortSpec<Person>([{ key: "age", dir: "asc" }], "age");
+    expect(next).toEqual([{ key: "age", dir: "desc" }]);
+  });
+
+  it("removes a descending column on the third toggle", () => {
+    const next = toggleSortSpec<Person>([{ key: "age", dir: "desc" }], "age");
+    expect(next).toEqual([]);
+  });
+
+  it("preserves the order of other specs", () => {
+    const specs: SortSpec<Person>[] = [
+      { key: "name", dir: "asc" },
+      { key: "age", dir: "asc" },
+    ];
+    const next = toggleSortSpec(specs, "age");
+    expect(next).toEqual([
+      { key: "name", dir: "asc" },
+      { key: "age", dir: "desc" },
+    ]);
+  });
+});
+
+describe("filterRowsByColumn", () => {
+  it("returns all rows when no filter is active", () => {
+    expect(filterRowsByColumn(people, {})).toHaveLength(4);
+    expect(filterRowsByColumn(people, { name: "  " })).toHaveLength(4);
+  });
+
+  it("applies a single column filter case-insensitively", () => {
+    const result = filterRowsByColumn(people, { name: "A" });
+    expect(result.map((p) => p.name).sort()).toEqual(["Charlie", "alice", "dave"].sort());
+  });
+
+  it("ANDs multiple column filters together", () => {
+    const result = filterRowsByColumn(people, { name: "b", age: "30" });
+    expect(result.map((p) => p.name)).toEqual(["Bob"]);
+  });
+
+  it("treats null/undefined cells as non-matching", () => {
+    const rows = [{ name: "x", age: null }];
+    expect(filterRowsByColumn(rows, { age: "5" })).toHaveLength(0);
+  });
+});
+
+describe("escapeCsvValue", () => {
+  it("passes plain values through unquoted", () => {
+    expect(escapeCsvValue("hello")).toBe("hello");
+    expect(escapeCsvValue(42)).toBe("42");
+  });
+
+  it("returns empty string for null/undefined", () => {
+    expect(escapeCsvValue(null)).toBe("");
+    expect(escapeCsvValue(undefined)).toBe("");
+  });
+
+  it("quotes and escapes commas, quotes and newlines", () => {
+    expect(escapeCsvValue("a,b")).toBe('"a,b"');
+    expect(escapeCsvValue('she said "hi"')).toBe('"she said ""hi"""');
+    expect(escapeCsvValue("line1\nline2")).toBe('"line1\nline2"');
+  });
+
+  it("serializes Date as ISO", () => {
+    expect(escapeCsvValue(new Date("2021-03-04T00:00:00.000Z"))).toBe(
+      "2021-03-04T00:00:00.000Z",
+    );
+  });
+});
+
+describe("toCsv", () => {
+  const cols = [
+    { key: "name" as const, header: "Name" },
+    { key: "age" as const, header: "Age" },
+  ];
+
+  it("emits a header row and CRLF-joined data rows", () => {
+    const csv = toCsv(people, cols);
+    const lines = csv.split("\r\n");
+    expect(lines[0]).toBe("Name,Age");
+    expect(lines[1]).toBe("Charlie,30");
+    expect(lines).toHaveLength(5);
+  });
+
+  it("can omit the header and use a custom delimiter", () => {
+    const csv = toCsv([{ name: "a", age: 1 }], cols, {
+      includeHeader: false,
+      delimiter: ";",
+    });
+    expect(csv).toBe("a;1");
+  });
+
+  it("escapes fields needing quoting", () => {
+    const csv = toCsv([{ name: "Doe, John", age: 1 }], cols, {
+      includeHeader: false,
+    });
+    expect(csv).toBe('"Doe, John",1');
+  });
+});
+
+describe("resolveRowId", () => {
+  it("uses the index when no getRowId is provided", () => {
+    expect(resolveRowId({ name: "x" }, 3)).toBe("3");
+  });
+
+  it("uses getRowId when provided", () => {
+    expect(resolveRowId({ name: "x" }, 0, (r) => r.name as string)).toBe("x");
+  });
+});
+
+describe("toggleSelection", () => {
+  it("adds an absent id", () => {
+    expect([...toggleSelection(new Set(), "a")]).toEqual(["a"]);
+  });
+
+  it("removes a present id", () => {
+    expect([...toggleSelection(new Set(["a", "b"]), "a")]).toEqual(["b"]);
+  });
+
+  it("returns a new set without mutating the input", () => {
+    const original = new Set(["a"]);
+    const next = toggleSelection(original, "b");
+    expect(original.size).toBe(1);
+    expect(next.size).toBe(2);
+  });
+});
+
+describe("selectionState", () => {
+  it("returns none for an empty visible set", () => {
+    expect(selectionState(new Set(["a"]), [])).toBe("none");
+  });
+
+  it("returns none when nothing visible is selected", () => {
+    expect(selectionState(new Set(["x"]), ["a", "b"])).toBe("none");
+  });
+
+  it("returns some for a partial selection", () => {
+    expect(selectionState(new Set(["a"]), ["a", "b"])).toBe("some");
+  });
+
+  it("returns all when every visible id is selected", () => {
+    expect(selectionState(new Set(["a", "b"]), ["a", "b"])).toBe("all");
+  });
+});
+
+describe("setAllSelected", () => {
+  it("selects all visible ids while preserving outside selections", () => {
+    const next = setAllSelected(new Set(["z"]), ["a", "b"], true);
+    expect([...next].sort()).toEqual(["a", "b", "z"]);
+  });
+
+  it("deselects only the visible ids", () => {
+    const next = setAllSelected(new Set(["a", "b", "z"]), ["a", "b"], false);
+    expect([...next]).toEqual(["z"]);
   });
 });
